@@ -72,6 +72,16 @@ import java.util.Map;
 import java.util.PriorityQueue;
 
 public class MainActivity extends AppCompatActivity implements AdapterView.OnItemSelectedListener {
+
+    /**
+     * An instance of the driver class to run model inference with Firebase.
+     */
+    private FirebaseModelInterpreter mInterpreter;
+    /**
+     * Data configuration of input & output data of model.
+     */
+    private FirebaseModelInputOutputOptions mDataOptions;
+
     private static final String TAG = "MainActivity";
     private ImageView mImageView;
     private Button mTextButton;
@@ -170,35 +180,223 @@ public class MainActivity extends AppCompatActivity implements AdapterView.OnIte
     }
 
     private void runTextRecognition() {
-        // Replace with code from the codelab to run text recognition.
+        FirebaseVisionImage image = FirebaseVisionImage.fromBitmap(mSelectedImage);
+        FirebaseVisionTextRecognizer recognizer = FirebaseVision.getInstance()
+                .getOnDeviceTextRecognizer();
+        mTextButton.setEnabled(false);
+        recognizer.processImage(image)
+                .addOnSuccessListener(
+                        new OnSuccessListener<FirebaseVisionText>() {
+                            @Override
+                            public void onSuccess(FirebaseVisionText texts) {
+                                mTextButton.setEnabled(true);
+                                processTextRecognitionResult(texts);
+                            }
+                        })
+                .addOnFailureListener(
+                        new OnFailureListener() {
+                            @Override
+                            public void onFailure(@NonNull Exception e) {
+                                // Task failed with an exception
+                                mTextButton.setEnabled(true);
+                                e.printStackTrace();
+                            }
+                        });
     }
 
     private void processTextRecognitionResult(FirebaseVisionText texts) {
-        // Replace with code from the codelab to process the text recognition result.
+        List<FirebaseVisionText.TextBlock> blocks = texts.getTextBlocks();
+        if (blocks.size() == 0) {
+            showToast("No text found");
+            return;
+        }
+        mGraphicOverlay.clear();
+        for (int i = 0; i < blocks.size(); i++) {
+            List<FirebaseVisionText.Line> lines = blocks.get(i).getLines();
+            for (int j = 0; j < lines.size(); j++) {
+                List<FirebaseVisionText.Element> elements = lines.get(j).getElements();
+                for (int k = 0; k < elements.size(); k++) {
+                    Graphic textGraphic = new TextGraphic(mGraphicOverlay, elements.get(k));
+                    mGraphicOverlay.add(textGraphic);
+
+                }
+            }
+        }
     }
 
     private void runFaceContourDetection() {
-        // Replace with code from the codelab to run face contour detection.
+        FirebaseVisionImage image = FirebaseVisionImage.fromBitmap(mSelectedImage);
+        FirebaseVisionFaceDetectorOptions options =
+                new FirebaseVisionFaceDetectorOptions.Builder()
+                        .setPerformanceMode(FirebaseVisionFaceDetectorOptions.FAST)
+                        .setContourMode(FirebaseVisionFaceDetectorOptions.ALL_CONTOURS)
+                        .build();
+
+        mFaceButton.setEnabled(false);
+        FirebaseVisionFaceDetector detector = FirebaseVision.getInstance().getVisionFaceDetector(options);
+        detector.detectInImage(image)
+                .addOnSuccessListener(
+                        new OnSuccessListener<List<FirebaseVisionFace>>() {
+                            @Override
+                            public void onSuccess(List<FirebaseVisionFace> faces) {
+                                mFaceButton.setEnabled(true);
+                                processFaceContourDetectionResult(faces);
+                            }
+                        })
+                .addOnFailureListener(
+                        new OnFailureListener() {
+                            @Override
+                            public void onFailure(@NonNull Exception e) {
+                                // Task failed with an exception
+                                mFaceButton.setEnabled(true);
+                                e.printStackTrace();
+                            }
+                        });
+
     }
 
     private void processFaceContourDetectionResult(List<FirebaseVisionFace> faces) {
-        // Replace with code from the codelab to process the face contour detection result.
+        // Task completed successfully
+        if (faces.size() == 0) {
+            showToast("No face found");
+            return;
+        }
+        mGraphicOverlay.clear();
+        for (int i = 0; i < faces.size(); ++i) {
+            FirebaseVisionFace face = faces.get(i);
+            FaceContourGraphic faceGraphic = new FaceContourGraphic(mGraphicOverlay);
+            mGraphicOverlay.add(faceGraphic);
+            faceGraphic.updateFace(face);
+        }
     }
 
     private void initCustomModel() {
-        // Replace with code from the codelab to initialize your custom model
+        mLabelList = loadLabelList(this);
+
+        int[] inputDims = {DIM_BATCH_SIZE, DIM_IMG_SIZE_X, DIM_IMG_SIZE_Y, DIM_PIXEL_SIZE};
+        int[] outputDims = {DIM_BATCH_SIZE, mLabelList.size()};
+        try {
+            mDataOptions =
+                    new FirebaseModelInputOutputOptions.Builder()
+                            .setInputFormat(0, FirebaseModelDataType.BYTE, inputDims)
+                            .setOutputFormat(0, FirebaseModelDataType.BYTE, outputDims)
+                            .build();
+            FirebaseModelDownloadConditions conditions = new FirebaseModelDownloadConditions
+                    .Builder()
+                    .requireWifi()
+                    .build();
+            FirebaseRemoteModel remoteModel = new FirebaseRemoteModel.Builder
+                    (HOSTED_MODEL_NAME)
+                    .enableModelUpdates(true)
+                    .setInitialDownloadConditions(conditions)
+                    .setUpdatesDownloadConditions(conditions)  // You could also specify
+                    // different conditions
+                    // for updates
+                    .build();
+            FirebaseLocalModel localModel =
+                    new FirebaseLocalModel.Builder("asset")
+                            .setAssetFilePath(LOCAL_MODEL_ASSET).build();
+            FirebaseModelManager manager = FirebaseModelManager.getInstance();
+            manager.registerRemoteModel(remoteModel);
+            manager.registerLocalModel(localModel);
+            FirebaseModelOptions modelOptions =
+                    new FirebaseModelOptions.Builder()
+                            .setRemoteModelName(HOSTED_MODEL_NAME)
+                            .setLocalModelName("asset")
+                            .build();
+            mInterpreter = FirebaseModelInterpreter.getInstance(modelOptions);
+        } catch (FirebaseMLException e) {
+            showToast("Error while setting up the model");
+            e.printStackTrace();
+        }
     }
 
     private void runModelInference() {
-        // Replace with code from the codelab to run inference using your custom model.
+        if (mInterpreter == null) {
+            Log.e(TAG, "Image classifier has not been initialized; Skipped.");
+            return;
+        }
+        // Create input data.
+        ByteBuffer imgData = convertBitmapToByteBuffer(mSelectedImage, mSelectedImage.getWidth(),
+                mSelectedImage.getHeight());
+
+        try {
+            FirebaseModelInputs inputs = new FirebaseModelInputs.Builder().add(imgData).build();
+            // Here's where the magic happens!!
+            mInterpreter
+                    .run(inputs, mDataOptions)
+                    .addOnFailureListener(new OnFailureListener() {
+                        @Override
+                        public void onFailure(@NonNull Exception e) {
+                            e.printStackTrace();
+                            showToast("Error running model inference");
+                        }
+                    })
+                    .continueWith(
+                            new Continuation<FirebaseModelOutputs, List<String>>() {
+                                @Override
+                                public List<String> then(Task<FirebaseModelOutputs> task) {
+                                    byte[][] labelProbArray = task.getResult()
+                                            .<byte[][]>getOutput(0);
+                                    List<String> topLabels = getTopLabels(labelProbArray);
+                                    mGraphicOverlay.clear();
+                                    GraphicOverlay.Graphic labelGraphic = new LabelGraphic
+                                            (mGraphicOverlay, topLabels);
+                                    mGraphicOverlay.add(labelGraphic);
+                                    return topLabels;
+                                }
+                            });
+        } catch (FirebaseMLException e) {
+            e.printStackTrace();
+            showToast("Error running model inference");
+        }
+
     }
 
     private void runCloudTextRecognition() {
-        // Replace with code from the codelab to run cloud text recognition.
+        mCloudButton.setEnabled(false);
+        FirebaseVisionImage image = FirebaseVisionImage.fromBitmap(mSelectedImage);
+        FirebaseVisionDocumentTextRecognizer recognizer = FirebaseVision.getInstance()
+                .getCloudDocumentTextRecognizer();
+        recognizer.processImage(image)
+                .addOnSuccessListener(
+                        new OnSuccessListener<FirebaseVisionDocumentText>() {
+                            @Override
+                            public void onSuccess(FirebaseVisionDocumentText texts) {
+                                mCloudButton.setEnabled(true);
+                                processCloudTextRecognitionResult(texts);
+                            }
+                        })
+                .addOnFailureListener(
+                        new OnFailureListener() {
+                            @Override
+                            public void onFailure(@NonNull Exception e) {
+                                // Task failed with an exception
+                                mCloudButton.setEnabled(true);
+                                e.printStackTrace();
+                            }
+                        });
     }
 
     private void processCloudTextRecognitionResult(FirebaseVisionDocumentText text) {
-        // Replace with code from the codelab to process the cloud text recognition result.
+        // Task completed successfully
+        if (text == null) {
+            showToast("No text found");
+            return;
+        }
+        mGraphicOverlay.clear();
+        List<FirebaseVisionDocumentText.Block> blocks = text.getBlocks();
+        for (int i = 0; i < blocks.size(); i++) {
+            List<FirebaseVisionDocumentText.Paragraph> paragraphs = blocks.get(i).getParagraphs();
+            for (int j = 0; j < paragraphs.size(); j++) {
+                List<FirebaseVisionDocumentText.Word> words = paragraphs.get(j).getWords();
+                for (int l = 0; l < words.size(); l++) {
+                    CloudTextGraphic cloudDocumentTextGraphic = new CloudTextGraphic(mGraphicOverlay,
+                            words.get(l));
+                    mGraphicOverlay.add(cloudDocumentTextGraphic);
+                }
+            }
+        }
     }
 
     /**
